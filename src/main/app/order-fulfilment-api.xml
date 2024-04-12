@@ -1,0 +1,422 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:validation="http://www.mulesoft.org/schema/mule/validation" xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" 
+	xmlns:json="http://www.mulesoft.org/schema/mule/json" 
+	xmlns:dw="http://www.mulesoft.org/schema/mule/ee/dw" 
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" 
+	xmlns="http://www.mulesoft.org/schema/mule/core" 
+	xmlns:apikit="http://www.mulesoft.org/schema/mule/apikit" 
+	xmlns:http="http://www.mulesoft.org/schema/mule/http" 
+	xmlns:spring="http://www.springframework.org/schema/beans" 
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/apikit http://www.mulesoft.org/schema/mule/apikit/current/mule-apikit.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-3.1.xsd
+http://www.mulesoft.org/schema/mule/ee/dw http://www.mulesoft.org/schema/mule/ee/dw/current/dw.xsd
+http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd">
+    
+    
+    <flow name="order-fulfilment-api-main">
+        <http:listener config-ref="order-fulfilment-api-httpListenerConfig" path="/api/*" doc:name="HTTP"/>
+        <apikit:router config-ref="order-fulfilment-api-config" doc:name="APIkit Router"/>
+        <exception-strategy ref="order-fulfilment-api-apiKitGlobalExceptionMapping" doc:name="Reference Exception Strategy"/>
+    </flow>
+    <flow name="order-fulfilment-api-console">
+        <http:listener config-ref="order-fulfilment-api-httpListenerConfig" path="/console/*" doc:name="HTTP"/>
+        <apikit:console config-ref="order-fulfilment-api-config" doc:name="APIkit Console"/>
+    </flow>
+    <flow name="post:/orders:order-fulfilment-api-config">
+        <dw:transform-message doc:name="save to var inputOrder, set totaltax, subtotal, listPartners, warehouseShipping">
+            <dw:set-variable variableName="inputOrder"><![CDATA[%dw 1.0
+%output application/java
+---
+payload]]></dw:set-variable>
+            <dw:set-variable variableName="totalTax"><![CDATA[%dw 1.0
+%output application/java
+---
+0]]></dw:set-variable>
+            <dw:set-variable variableName="subtotal"><![CDATA[%dw 1.0
+%output application/java
+---
+0]]></dw:set-variable>
+            <dw:set-variable variableName="warehouseShipping"><![CDATA[%dw 1.0
+%output application/java
+---
+0]]></dw:set-variable>
+            <dw:set-variable variableName="listPartners"><![CDATA[%dw 1.0
+%output application/java
+---
+[]]]></dw:set-variable>
+
+        </dw:transform-message>
+        <flow-ref name="checkAvailability" doc:name="checkAvailability"/>
+        <flow-ref name="reserveOrderItems" doc:name="reserveOrderItems"/>
+        <flow-ref name="createOrder" doc:name="createOrder"/>
+        <choice doc:name="Successfully created?">
+            <when expression="#[flowVars.order != null]">
+                <flow-ref name="processPayment" doc:name="processPayment"/>
+                <flow-ref name="updateOrderStatus" doc:name="updateOrderStatus"/>
+                <async doc:name="Async">
+                    <flow-ref name="sendNotificationEmail" doc:name="sendNotificationEmail"/>
+                </async>
+                <dw:transform-message doc:name="build response">
+                	<dw:input-variable mimeType="application/java" variableName="order]"/>
+                    <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+---
+{
+	"status": "created",
+	"orderId": flowVars.order.orderId
+}]]></dw:set-payload>
+                </dw:transform-message>
+            </when>
+            <otherwise>
+                <dw:transform-message doc:name="Failure">
+                    <dw:set-payload><![CDATA[%dw 1.0
+%output application/java
+---
+{
+	id: null,
+	status: "failed",
+	message: "Order creation failed"
+}]]></dw:set-payload>
+                </dw:transform-message>
+            </otherwise>
+        </choice>
+    </flow>
+    
+    
+    
+    <sub-flow name="checkAvailability">
+        <foreach collection="#[flowVars.inputOrder.orderItems]" doc:name="For Each OrderItem">
+            <set-variable variableName="currentItem" value="#[payload]" doc:name="var currentItem"/>
+
+            <http:request config-ref="product-availability-api" path="/locations/{locationId}/availability" method="GET" doc:name="Check availability">
+                <http:request-builder>
+                    <http:query-param paramName="variantId" value="#[payload.itemId]"/>
+                    <http:query-param paramName="productId" value="#[payload.productId]"/>
+                    <http:query-param paramName="locationType" value="#[payload.location.locationType]"/>
+                    <http:query-param paramName="quantity" value="#[payload.quantity]"/>
+                    <http:query-param paramName="price" value="#[payload.price]"/>
+                    <http:uri-param paramName="locationId" value="#[payload.location.locationId]"/>
+
+
+
+                </http:request-builder>
+            </http:request>
+            <dw:transform-message doc:name="check availability, calculate subtotal, totalTax, set listPartners, warehouseShipping">
+                <dw:set-payload><![CDATA[%dw 1.0
+%output application/java
+---
+payload.quantityInStock >= flowVars.currentItem.quantity
+
+]]></dw:set-payload>
+                <dw:set-variable variableName="totalTax"><![CDATA[%dw 1.0
+%output application/java
+---
+flowVars.totalTax + payload.tax ]]></dw:set-variable>
+                <dw:set-variable variableName="subtotal"><![CDATA[%dw 1.0
+%output application/java
+---
+flowVars.subtotal + (flowVars.currentItem.price*flowVars.currentItem.quantity)]]></dw:set-variable>
+                <dw:set-variable variableName="warehouseShipping"><![CDATA[%dw 1.0
+%output application/java
+---
+payload.shipping when ((payload.locationType == "WAREHOUSE") and (payload.shipping > flowVars.warehouseShipping))
+	otherwise flowVars.warehouseShipping]]></dw:set-variable>
+                <dw:set-variable variableName="listPartners"><![CDATA[%dw 1.0
+%output application/java
+---
+(flowVars.listPartners + payload) distinctBy $.locationId when (payload.locationType == "PARTNER")
+	otherwise flowVars.listPartners ]]></dw:set-variable>
+            </dw:transform-message>
+
+
+            <validation:is-true expression="#[payload]" doc:name="All items must be available"/>
+        </foreach>
+        <choice doc:name="Is partnersList empty?">
+            <when expression="#[flowVars.listPartners != []]">
+                <dw:transform-message doc:name="Calculation total shipping">
+                    <dw:set-variable variableName="totalShipping"><![CDATA[%dw 1.0
+%output application/java
+---
+flowVars.warehouseShipping + (flowVars.listPartners reduce ((item, sum1 = 0) -> sum1 + (item.shipping)))
+       ]]></dw:set-variable>
+                </dw:transform-message>
+            </when>
+            <otherwise>
+                <dw:transform-message doc:name="Transform Message">
+                    <dw:set-variable variableName="totalShipping"><![CDATA[%dw 1.0
+%output application/java
+---
+flowVars.warehouseShipping]]></dw:set-variable>
+                </dw:transform-message>
+            </otherwise>
+        </choice>
+
+    </sub-flow>
+    
+    <sub-flow name="reserveOrderItems">
+        <foreach collection="#[flowVars.inputOrder.orderItems]" doc:name="For Each Order Item">
+            <dw:transform-message doc:name="reservation request">
+                <dw:set-payload><![CDATA[%dw 1.0
+%output application/java
+---
+{     
+  "variantId": payload.itemId,
+  "productId": payload.productId,
+  "locationId": payload.location.locationId, 
+  "deliveryMethod": payload.location.deliveryMethod,
+  "locationType": payload.location.locationType, 
+  "quantity": payload.quantity, 
+  "customerId": flowVars.inputOrder.customerId   
+}]]></dw:set-payload>
+            </dw:transform-message>
+            <choice doc:name="Is order placed from Partner?">
+                <when expression="#[payload.locationType == &quot;PARTNER&quot;]">
+                    <enricher source="#[payload]" target="#[flowVars.customerData]" doc:name="Set data about customer">
+                        <http:request config-ref="customers-api" path="/customers/{customerId}" method="GET" doc:name="Fetch customer data">
+                            <http:request-builder>
+                                <http:uri-param paramName="customerId" value="#[payload.customerId]"/>
+                            </http:request-builder>
+                        </http:request>
+                    </enricher>
+                    <dw:transform-message doc:name="Add customer's data to reservation request">
+                        <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+---
+payload ++ {
+	name: flowVars.customerData.firstName ++ " " ++ flowVars.customerData.lastName,
+	price: flowVars.inputOrder.price,
+	address: flowVars.customerData.postalAddress,
+	partnerId: payload.locationId
+}]]></dw:set-payload>
+                    </dw:transform-message>
+                    <http:request config-ref="partners-api" path="/reservation" method="POST" doc:name="Reserve order item via Partner">
+                        <http:request-builder>
+                            <http:header headerName="Content-type" value="application/json"/>
+                        </http:request-builder>
+                    </http:request>
+                </when>
+                <otherwise>
+                    <json:object-to-json-transformer doc:name="Object to JSON"/>
+                    <http:request config-ref="product-availability-api" path="/reservation" method="POST" doc:name="Reserve order item">
+                        <http:request-builder>
+                            <http:header headerName="Content-Type" value="application/json"/>
+                        </http:request-builder>
+                    </http:request>
+                </otherwise>
+            </choice>
+
+        </foreach>
+    </sub-flow>
+    
+    <sub-flow name="createOrder">
+        <enricher source="#[payload]" target="#[flowVars.order]" doc:name="var order">
+            <processor-chain doc:name="Processor Chain">
+                <dw:transform-message doc:name="map input to Order API">
+                    <dw:input-variable variableName="inputOrder"/>
+                    <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+---
+{
+	subtotal: ((round (flowVars.subtotal)*100)/100) as :string,
+	totalTax: ((round (flowVars.totalTax)*100)/100) as :string,
+	shippingCost: ((round (flowVars.totalShipping)*100)/100) as :string,
+	total: ((round (flowVars.subtotal + flowVars.totalTax + flowVars.totalShipping)*100)/100) as :string,
+	status: "Draft",
+	orderItems: {
+	  pickupItems : (flowVars.inputOrder.orderItems filter $.location.locationType == "STORE") 
+	  	map (orderItem) -> {
+	  		productName: orderItem.name,
+			price: orderItem.price,
+			quantity: orderItem.quantity,
+			deliveryMethod: orderItem.location.deliveryMethod,
+			productId: orderItem.productId,
+			orderItemId: orderItem.itemId,
+			locationId: orderItem.location.locationId
+	  },
+	  shipmentItems : (flowVars.inputOrder.orderItems filter $.location.locationType == "WAREHOUSE") 
+	  	map (orderItem) -> {
+			productName: orderItem.name,
+			price: orderItem.price,
+			quantity: orderItem.quantity,
+			deliveryMethod: orderItem.location.deliveryMethod,
+			productId: orderItem.productId,
+			orderItemId: orderItem.itemId,
+			locationId: orderItem.location.locationId
+	  },
+	  partnersItems : (flowVars.inputOrder.orderItems filter $.location.locationType == "PARTNER") 
+	  	map (orderItem) -> {
+			productName: orderItem.name,
+			price: orderItem.price,
+			quantity: orderItem.quantity,
+			deliveryMethod: orderItem.location.deliveryMethod,
+			productId: orderItem.productId,
+			orderItemId: orderItem.itemId,
+			locationId: orderItem.location.locationId
+	  }
+	}
+}]]></dw:set-payload>
+
+                </dw:transform-message>
+
+                <http:request config-ref="orders-api" path="/orders/customer/{customerId}" method="POST" doc:name="Create Order">
+                    <http:request-builder>
+                        <http:uri-param paramName="customerId" value="#[ flowVars.inputOrder.customerId ]"/>
+                        <http:header headerName="Content-Type" value="application/json"/>
+                    </http:request-builder>
+                </http:request>
+                <json:json-to-object-transformer returnClass="java.util.Map" mimeType="application/java" doc:name="JSON to Object"/>
+            </processor-chain>
+        </enricher>
+    </sub-flow>
+    
+    <sub-flow name="processPayment">
+        <dw:transform-message doc:name="prepare payment request">
+        	<dw:input-variable mimeType="application/java" variableName="order"/>
+            <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+---
+{
+  "price": {
+    "amount": {
+      "currency": "USD",
+      "currencyValue": flowVars.inputOrder.price,
+      "name": "Amount"
+    },
+    "salesUnit": {
+      "code": "EA",
+      "name": "Each"
+    }
+  },
+  "customer": {
+    "paymentMethod": "BANK",
+    "orderId": flowVars.order.id,
+    "customerId": flowVars.inputOrder.customerId
+  }
+}]]></dw:set-payload>
+        </dw:transform-message>
+        <http:request config-ref="payment-process-api" path="/processPayment" method="POST" doc:name="Payment">
+            <http:request-builder>
+                <http:header headerName="Content-Type" value="application/json"/>
+            </http:request-builder>
+        </http:request>
+    </sub-flow>
+    
+    <sub-flow name="updateOrderStatus">
+        <dw:transform-message doc:name="Update status to Processing">
+            <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+---
+{
+	status: "Processing"
+}]]></dw:set-payload>
+        </dw:transform-message>
+
+        <http:request config-ref="orders-api" path="/orders/{orderId}/status" method="PUT" doc:name="Update order status">
+            <http:request-builder>
+                <http:uri-param paramName="orderId" value="#[flowVars.order.orderId]"/>
+
+            </http:request-builder>
+        </http:request>
+    </sub-flow>
+    
+    <sub-flow name="sendNotificationEmail">
+        <logger level="INFO" doc:name="Send Notification to user (email)" message="Sending notification..."/>
+        <http:request config-ref="customers-api" path="/customers/{customerId}" method="GET" doc:name="Get Customer info">
+            <http:request-builder>
+                <http:uri-param paramName="customerId" value="#[flowVars.inputOrder.customerId]"/>
+            </http:request-builder>
+        </http:request>
+        <dw:transform-message doc:name="build notification e-mail">
+            <dw:input-variable mimeType="application/java" variableName="order]"/>
+            <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+%var pickupItems = flowVars.inputOrder.orderItems filter $.location.locationType == "STORE"
+%var warehouseItems = flowVars.inputOrder.orderItems filter $.location.locationType == "WAREHOUSE"
+%var partnerItems = flowVars.inputOrder.orderItems filter $.location.locationType == "PARTNER"
+---
+{
+    type: "EMAIL",
+    priority: "MINOR",
+    recipient: payload.emailAddress,
+    subject: "Order - $(flowVars.order.orderId) | Anypoint Store",
+    message: "Hello,
+
+Your order [ $(flowVars.order.orderId) ] has been placed.\n\n"
+++ 
+(("Items to be picked up in store: \n\n" ++
+(pickupItems map (
+  		"Product Name:" ++ $.name ++ "\n"
+  		++ "Quantity:" ++ $.quantity ++ "\n"
+		++ "Price:" ++ $.price ++ "\n"
+	) joinBy "\n")
+	++ "-----------------------------\n\n"
+) when not pickupItems is :empty otherwise '')
+++ 
+(("Items to be shipped: \n\n" ++
+(warehouseItems map ( 
+  		"Product Name:" ++ $.name ++ "\n"
+  		++ "Quantity:" ++ $.quantity ++ "\n"
+		++ "Price:" ++ $.price ++ " USD\n"
+	) joinBy "\n")
+	++ "-----------------------------\n\n"
+) when not warehouseItems is :empty otherwise '')
+++ 
+(("Items ordered from partners: \n\n" ++
+(partnerItems map ( 
+  		"Product Name:" ++ $.name ++ "\n"
+  		++ "Quantity:" ++ $.quantity ++ "\n"
+		++ "Price:" ++ $.price ++ " USD\n"
+	) joinBy "\n")
+	++ "-----------------------------\n"
+) when not partnerItems is :empty otherwise '')
+++
+"Total price: " ++ ((round (flowVars.subtotal + flowVars.totalTax + flowVars.totalShipping)*100)/100) as :string ++ " USD\n\n"
+++ "We will inform you about future updates.
+
+Thanks,
+MuleSoft Team"   
+}]]></dw:set-payload>
+        </dw:transform-message>
+
+        <http:request config-ref="notifications-api" path="/notifications" method="POST" doc:name="Send e-mail notification">
+            <http:request-builder>
+                <http:header headerName="Content-Type" value="application/json"/>
+            </http:request-builder>
+        </http:request>
+    </sub-flow>
+    
+    
+    
+    <apikit:mapping-exception-strategy name="order-fulfilment-api-apiKitGlobalExceptionMapping">
+        <apikit:mapping statusCode="404">
+            <apikit:exception value="org.mule.module.apikit.exception.NotFoundException" />
+            <set-property propertyName="Content-Type" value="application/json" doc:name="Property"/>
+            <set-payload value="{ &quot;message&quot;: &quot;Resource not found&quot; }" doc:name="Set Payload"/>
+        </apikit:mapping>
+        <apikit:mapping statusCode="405">
+            <apikit:exception value="org.mule.module.apikit.exception.MethodNotAllowedException" />
+            <set-property propertyName="Content-Type" value="application/json" doc:name="Property"/>
+            <set-payload value="{ &quot;message&quot;: &quot;Method not allowed&quot; }" doc:name="Set Payload"/>
+        </apikit:mapping>
+        <apikit:mapping statusCode="415">
+            <apikit:exception value="org.mule.module.apikit.exception.UnsupportedMediaTypeException" />
+            <set-property propertyName="Content-Type" value="application/json" doc:name="Property"/>
+            <set-payload value="{ &quot;message&quot;: &quot;Unsupported media type&quot; }" doc:name="Set Payload"/>
+        </apikit:mapping>
+        <apikit:mapping statusCode="406">
+            <apikit:exception value="org.mule.module.apikit.exception.NotAcceptableException" />
+            <set-property propertyName="Content-Type" value="application/json" doc:name="Property"/>
+            <set-payload value="{ &quot;message&quot;: &quot;Not acceptable&quot; }" doc:name="Set Payload"/>
+        </apikit:mapping>
+        <apikit:mapping statusCode="400">
+            <apikit:exception value="org.mule.module.apikit.exception.BadRequestException" />
+            <set-property propertyName="Content-Type" value="application/json" doc:name="Property"/>
+            <set-payload value="{ &quot;message&quot;: &quot;Bad request&quot; }" doc:name="Set Payload"/>
+        </apikit:mapping>
+    </apikit:mapping-exception-strategy>
+</mule>
